@@ -14,7 +14,7 @@ pub struct RouterStore {
 
 pub struct StateChannelEntry {
     state_channel: StateChannel,
-    in_conflict: bool,
+    conflict: Some(StateChannel),
 }
 
 #[derive(Debug)]
@@ -87,18 +87,25 @@ impl RouterStore {
     }
 
     pub fn get_state_channel(&self, sk: &[u8]) -> Result<Option<&StateChannel>> {
-        match self.state_channels.get(&sk.to_vec()) {
+        match self.get_state_channel_details(sk)? {
             None => Ok(None),
-            Some(StateChannelEntry {
-                in_conflict,
-                state_channel,
-            }) => {
-                if *in_conflict {
+            Some((in_conflict, state_channel)) => {
+                if in_conflict {
                     Err(StateChannelError::causal_conflict())
                 } else {
                     Ok(Some(state_channel))
                 }
             }
+        }
+    }
+
+    pub fn get_state_channel_details(&self, sk: &[u8]) -> Result<Option<(bool, &StateChannel)>> {
+        match self.state_channels.get(&sk.to_vec()) {
+            None => Ok(None),
+            Some(StateChannelEntry {
+                in_conflict,
+                state_channel,
+            }) => Ok(Some((*in_conflict, state_channel))),
         }
     }
 
@@ -122,6 +129,10 @@ impl RouterStore {
             },
         );
         Ok(())
+    }
+
+    pub fn remove_state_channel(&mut self, sk: &[u8]) -> Option<StateChannelEntry> {
+        self.state_channels.remove(&sk.to_vec())
     }
 
     pub fn state_channel_count(&self) -> usize {

@@ -9,8 +9,7 @@ use helium_crypto::PublicKey;
 use helium_proto::{
     blockchain_state_channel_message_v1::Msg, BlockchainStateChannelBannerV1,
     BlockchainStateChannelMessageV1, BlockchainStateChannelOfferV1, BlockchainStateChannelPacketV1,
-    BlockchainStateChannelPurchaseV1, BlockchainStateChannelRejectionV1,
-    BlockchainStateChannelResponseV1, BlockchainStateChannelSummaryV1, BlockchainStateChannelV1,
+    BlockchainStateChannelPurchaseV1, BlockchainStateChannelSummaryV1, BlockchainStateChannelV1,
     Message,
 };
 use sha2::{Digest, Sha256};
@@ -59,22 +58,6 @@ impl StateChannelMessage {
     pub fn to_message(self) -> BlockchainStateChannelMessageV1 {
         BlockchainStateChannelMessageV1 { msg: Some(self.0) }
     }
-
-    pub fn state_channel(&self) -> Option<&BlockchainStateChannelV1> {
-        match &self.0 {
-            Msg::Banner(BlockchainStateChannelBannerV1 { sc }) => sc.as_ref(),
-            Msg::Purchase(BlockchainStateChannelPurchaseV1 { sc, .. }) => sc.as_ref(),
-            _ => None,
-        }
-    }
-
-    pub fn downlink(&self) -> Option<&helium_proto::Packet> {
-        match &self.0 {
-            Msg::Response(BlockchainStateChannelResponseV1 { downlink, .. }) => downlink.as_ref(),
-            Msg::Packet(BlockchainStateChannelPacketV1 { packet, .. }) => packet.as_ref(),
-            _ => None,
-        }
-    }
 }
 
 impl From<Msg> for StateChannelMessage {
@@ -103,12 +86,8 @@ macro_rules! from_msg {
     };
 }
 
-from_msg!(BlockchainStateChannelResponseV1, Msg::Response);
 from_msg!(BlockchainStateChannelPacketV1, Msg::Packet);
 from_msg!(BlockchainStateChannelOfferV1, Msg::Offer);
-from_msg!(BlockchainStateChannelPurchaseV1, Msg::Purchase);
-from_msg!(BlockchainStateChannelBannerV1, Msg::Banner);
-from_msg!(BlockchainStateChannelRejectionV1, Msg::Reject);
 
 #[derive(PartialEq, Debug)]
 pub enum StateChannelCausality {
@@ -160,7 +139,7 @@ impl StateChannel {
         match sc.state_channel() {
             None => Err(StateChannelError::not_found()),
             Some(sc) => {
-                let resp = gateway.is_active(&sc.id, &sc.owner).await?;
+                let resp = gateway.is_active_sc(&sc.id, &sc.owner).await?;
                 if !resp.active {
                     return Err(StateChannelError::inactive());
                 }

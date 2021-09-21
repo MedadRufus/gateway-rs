@@ -1,23 +1,27 @@
 use crate::{
     error::{Error, StateChannelError},
     router::{Dispatch, QuePacket, RouterStore},
-    service::gateway::GatewayService,
+    service::gateway::{GatewayService, StateChannelFollowService},
     service::router::{Service as RouterService, StateChannelService},
     CacheSettings, KeyedUri, Keypair, Packet, Region, Result, StateChannel, StateChannelCausality,
     StateChannelKey, StateChannelMessage,
 };
-use helium_proto::{blockchain_state_channel_message_v1::Msg, BlockchainStateChannelV1};
+use helium_proto::{
+    blockchain_state_channel_message_v1::Msg, BlockchainStateChannelV1, CloseState,
+    GatewayScFollowStreamedRespV1,
+};
 use slog::{info, o, warn, Logger};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub struct RouterClient {
-    client: RouterService,
+    router: RouterService,
     oui: u32,
     region: Region,
     keypair: Arc<Keypair>,
     downlinks: mpsc::Sender<Packet>,
     gateway: GatewayService,
+    state_channel_follower: StateChannelFollowService,
     store: RouterStore,
     state_channel: StateChannelService,
 }
@@ -27,16 +31,17 @@ impl RouterClient {
         oui: u32,
         region: Region,
         uri: KeyedUri,
-        gateway: GatewayService,
+        mut gateway: GatewayService,
         downlinks: mpsc::Sender<Packet>,
         keypair: Arc<Keypair>,
         settings: CacheSettings,
     ) -> Result<Self> {
-        let mut client = RouterService::new(uri)?;
-        let state_channel = client.state_channel()?;
+        let mut router = RouterService::new(uri)?;
+        let state_channel = router.state_channel()?;
+        let state_channel_follower = gateway.follow_sc().await?;
         let store = RouterStore::new(&settings);
         Ok(Self {
-            client,
+            router,
             oui,
             region,
             keypair,
@@ -44,6 +49,7 @@ impl RouterClient {
             store,
             state_channel,
             gateway,
+            state_channel_follower,
         })
     }
 
@@ -55,8 +61,8 @@ impl RouterClient {
     ) -> Result {
         let logger = logger.new(o!(
             "module" => "router",
-            "public_key" => self.client.uri.public_key.to_string(),
-            "uri" => self.client.uri.uri.to_string(),
+            "public_key" => self.router.uri.public_key.to_string(),
+            "uri" => self.router.uri.uri.to_string(),
             "oui" => self.oui,
         ));
         info!(logger, "starting");
@@ -79,6 +85,19 @@ impl RouterClient {
                         self.gateway = gateway;
                     },
                     None => warn!(logger, "ignoring closed uplinks channel"),
+                },
+                gw_message = self.state_channel_follower.message() => match gw_message {
+                    Ok(Some(message)) =>  {
+                        match self.handle_state_channel_close_message(&logger, message) {
+                            Ok(()) => (),
+                            Err(err) => warn!(logger, "gateway service handling error {:?}", err),
+                        }
+                    },
+                    Ok(None) => return Ok(()),
+                    Err(err) => {
+                        warn!(logger, "gateway service error {:?}", err);
+                        return Ok(())
+                    }
                 },
                 sc_message = self.state_channel.message() =>  match sc_message {
                     Ok(Some(message)) => {
@@ -111,6 +130,48 @@ impl RouterClient {
         //     return self.state_channel.connect().await;
         // }
         // self.send_packet_offers(logger).await
+    }
+
+    fn handle_state_channel_close_message(
+        &mut self,
+        logger: &Logger,
+        message: GatewayScFollowStreamedRespV1,
+    ) -> Result {
+        if let Some((in_conflict, sc)) = self.store.get_state_channel_details(&message.sc_id)? {
+            match CloseState::from_i32(message.close_state).unwrap() {
+                CloseState::Closable =>
+                // File a dispute as soon as we hit the expiration time
+                {
+                    if in_conflict {
+                        self.store.remove_state_channel(&message.sc_id);
+                    }
+                    Ok(())
+                }
+                CloseState::Closing =>
+                // This is after the router had it's time to close at the
+                // beginning of the grace period. Close non disputed
+                // state channels
+                {
+                    Ok(())
+                }
+                CloseState::Closed =>
+                // Done with the state channel, get it out of the cache
+                {
+                    self.store.remove_state_channel(&message.sc_id);
+                    Ok(())
+                }
+                CloseState::Dispute =>
+                // A state channel was disputed. If we disputed it it would
+                // already have been sent and removed as part of Closing
+                // handling. If it was disputed by someone else we'll file
+                // our close here too to get in on the dispute
+                {
+                    Ok(())
+                }
+            }
+        } else {
+            Ok(())
+        }
     }
 
     async fn handle_state_channel_message(
